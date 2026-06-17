@@ -8,3 +8,13 @@ wheels/
 
 # Virtual environments
 .venv
+
+# Default input files
+input.txt
+
+# Generated audio output
+output.mp3
+*.wav
+
+# IntelliJ
+/.idea/

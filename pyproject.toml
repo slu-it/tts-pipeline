@@ -1,7 +1,16 @@
 [project]
 name = "tts-pipeline"
 version = "0.1.0"
-description = "Add your description here"
+description = "Local text-to-speech pipeline using Kokoro, producing an MP3 from a plain text file."
 readme = "README.md"
-requires-python = ">=3.14"
-dependencies = []
+requires-python = ">=3.10,<3.13"
+dependencies = [
+    "kokoro>=0.9.4",
+    "soundfile>=0.13.0",
+    "numpy",
+]
+
+[tool.uv]
+# Kokoro pulls in torch transitively, so it is not pinned here on purpose:
+# letting Kokoro choose keeps the torch version compatible with the model.
+
