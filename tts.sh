@@ -7,12 +7,16 @@
 # synthesizer with absolute paths.
 #
 # Usage:
-#   ./tts.sh [--input <file.txt>] [--output <file.mp3>] [--voice <voice_id>]
+#   ./tts.sh [--input <file.txt>] [--output <file.mp3>]
+#            [--voice-language <locale>] [--voice-gender <m|f>] [--voice <id>]
 #
-#   --input    Path to a plain text (.txt) file. Relative paths are resolved
-#              against the directory you run the script from. Default: ./input.txt
-#   --output   Path to the MP3 to write. Default: ./output.mp3
-#   --voice    Kokoro voice id. Default: af_heart (American English).
+#   --input           Plain text (.txt) file. Relative paths resolve against the
+#                     directory you run the script from. Default: ./input.txt
+#   --output          MP3 file to write. Default: ./output.mp3
+#   --voice-language  Voice language: en_US or en_GB. Default: en_US.
+#   --voice-gender    Voice gender: m or f. Default: f.
+#   --voice           Explicit Kokoro voice id (e.g. af_heart). Overrides
+#                     --voice-language and --voice-gender when set.
 
 set -euo pipefail
 
@@ -21,13 +25,18 @@ set -euo pipefail
 # ---------------------------------------------------------------------------
 INPUT="./input.txt"
 OUTPUT="./output.mp3"
-VOICE="af_heart"
+# Empty VOICE means: derive the voice from language + gender on the Python side.
+VOICE=""
+VOICE_LANGUAGE="en_US"
+VOICE_GENDER="f"
 
 # Directory containing this script (where pyproject.toml lives).
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 usage() {
-    sed -n '3,16p' "$0" | sed 's/^# \{0,1\}//'
+    # Print the leading comment block (lines 3 onward until the first
+    # non-comment line), stripping the leading "# ".
+    sed -n '3,/^[^#]/p' "$0" | sed -n 's/^# \{0,1\}//p'
 }
 
 # ---------------------------------------------------------------------------
@@ -41,6 +50,10 @@ while [ $# -gt 0 ]; do
         --output=*) OUTPUT="${1#*=}";   shift ;;
         --voice)   VOICE="$2";          shift 2 ;;
         --voice=*) VOICE="${1#*=}";     shift ;;
+        --voice-language)   VOICE_LANGUAGE="$2";      shift 2 ;;
+        --voice-language=*) VOICE_LANGUAGE="${1#*=}"; shift ;;
+        --voice-gender)     VOICE_GENDER="$2";        shift 2 ;;
+        --voice-gender=*)   VOICE_GENDER="${1#*=}";   shift ;;
         -h|--help) usage; exit 0 ;;
         *) echo "error: unknown option '$1'" >&2; usage; exit 1 ;;
     esac
@@ -153,16 +166,27 @@ if [ "$(uname -s)" = "Darwin" ]; then
 fi
 
 echo "Running synthesis ..."
-echo "  input:  $ABS_INPUT"
-echo "  output: $ABS_OUTPUT"
-echo "  voice:  $VOICE"
+echo "  input:    $ABS_INPUT"
+echo "  output:   $ABS_OUTPUT"
+if [ -n "$VOICE" ]; then
+    echo "  voice:    $VOICE (explicit)"
+else
+    echo "  voice:    $VOICE_LANGUAGE / $VOICE_GENDER"
+fi
 
 # Time only the conversion itself (synthesis + MP3), not the dependency setup.
 # 'date +%s' (integer seconds) is portable across macOS and Linux; BSD date on
 # macOS does not support sub-second %N, so we stay with whole seconds.
 START_TS="$(date +%s)"
 
-uv run main.py --input "$ABS_INPUT" --output "$ABS_OUTPUT" --voice "$VOICE"
+# VOICE may be empty, in which case Python derives the voice from language and
+# gender. An empty --voice argument is treated as "not set" on the Python side.
+uv run main.py \
+    --input "$ABS_INPUT" \
+    --output "$ABS_OUTPUT" \
+    --voice "$VOICE" \
+    --voice-language "$VOICE_LANGUAGE" \
+    --voice-gender "$VOICE_GENDER"
 
 ELAPSED="$(( $(date +%s) - START_TS ))"
 if [ "$ELAPSED" -ge 60 ]; then

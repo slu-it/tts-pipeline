@@ -30,6 +30,44 @@ SAMPLE_RATE = 24000
 # just below it.
 MAX_COMPRESSION_LEVEL = 0.99
 
+# Maps (language locale, gender) to a concrete Kokoro voice id. Kokoro-82M only
+# ships American and British English among the locales of interest here; it has
+# no German or Australian English voices, so those locales are intentionally
+# absent and will raise a clear error rather than be silently substituted.
+# To add a locale later, add its (locale, gender) -> voice id entries here.
+VOICE_MAP = {
+    ("en_US", "f"): "af_heart",
+    ("en_US", "m"): "am_michael",
+    ("en_GB", "f"): "bf_emma",
+    ("en_GB", "m"): "bm_george",
+}
+
+
+def normalize_locale(locale: str) -> str:
+    """Canonicalize a locale string, e.g. 'en-gb' or 'EN_US' -> 'en_GB' / 'en_US'."""
+    parts = locale.replace("-", "_").split("_")
+    language = parts[0].lower()
+    if len(parts) > 1 and parts[1]:
+        return f"{language}_{parts[1].upper()}"
+    return language
+
+
+def resolve_voice(voice: str, language: str, gender: str) -> str:
+    """Pick the voice id. An explicit --voice wins; otherwise map language+gender."""
+    if voice:
+        return voice
+
+    key = (normalize_locale(language), gender)
+    if key not in VOICE_MAP:
+        supported = ", ".join(sorted({loc for loc, _ in VOICE_MAP}))
+        sys.exit(
+            f"error: no Kokoro voice for language '{language}' with gender '{gender}'.\n"
+            f"       Supported languages: {supported} (each with gender 'm' or 'f').\n"
+            f"       Kokoro-82M has no German or Australian English voices. Use an\n"
+            f"       explicit --voice <id> if you want a voice outside this table."
+        )
+    return VOICE_MAP[key]
+
 
 def require_absolute(path_str: str, label: str) -> Path:
     """Return a Path, exiting if the given path is not absolute."""
@@ -108,14 +146,27 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument("--output", required=True, help="Absolute path to the output .mp3 file.")
     parser.add_argument(
         "--voice",
-        default="af_heart",
-        help="Kokoro voice id (default: af_heart, American English).",
+        default="",
+        help="Explicit Kokoro voice id (for example af_heart, bm_george). When "
+             "set, it overrides --voice-language and --voice-gender.",
+    )
+    parser.add_argument(
+        "--voice-language",
+        default="en_US",
+        help="Voice language as an ISO locale: en_US (American English) or "
+             "en_GB (British English). Default: en_US.",
+    )
+    parser.add_argument(
+        "--voice-gender",
+        default="f",
+        choices=["m", "f"],
+        help="Voice gender: 'm' or 'f'. Default: f.",
     )
     parser.add_argument(
         "--lang-code",
         default=None,
-        help="Kokoro language code. Defaults to the first letter of the voice id "
-             "(for example 'a' for af_heart, 'b' for bf_emma).",
+        help="Kokoro language code. Defaults to the first letter of the resolved "
+             "voice id (for example 'a' for af_heart, 'b' for bf_emma).",
     )
     parser.add_argument(
         "--mp3-quality",
@@ -133,14 +184,15 @@ def main(argv=None) -> None:
     input_path = require_absolute(args.input, "input")
     output_path = require_absolute(args.output, "output")
 
+    voice = resolve_voice(args.voice, args.voice_language, args.voice_gender)
     # The Kokoro language code must match the voice; default to the voice prefix.
-    lang_code = args.lang_code or (args.voice[:1] or "a")
+    lang_code = args.lang_code or (voice[:1] or "a")
     quality = min(max(args.mp3_quality, 0.0), MAX_COMPRESSION_LEVEL)
 
     text = read_text(input_path)
-    print(f"Synthesizing {len(text)} characters with voice '{args.voice}' ...")
+    print(f"Synthesizing {len(text)} characters with voice '{voice}' ...")
 
-    duration = synthesize_to_mp3(text, args.voice, lang_code, output_path, quality)
+    duration = synthesize_to_mp3(text, voice, lang_code, output_path, quality)
     print(f"Done. Wrote {output_path} ({duration:.1f}s of audio).")
 
 

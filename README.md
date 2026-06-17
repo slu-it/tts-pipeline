@@ -32,14 +32,17 @@ first synthesis needs network access and takes a little longer.
 ## Usage
 
 ```bash
-# Defaults: ./input.txt -> ./output.mp3
+# Defaults: ./input.txt -> ./output.mp3, American English female voice
 ./tts.sh
 
 # Explicit paths (relative paths resolve against your current directory)
 ./tts.sh --input ./speech.txt --output ./out/speech.mp3
 
-# Pick a different voice
-./tts.sh --input ./speech.txt --output ./speech.mp3 --voice bf_emma
+# Pick a voice by language and gender
+./tts.sh --input ./speech.txt --output ./speech.mp3 --voice-language en_GB --voice-gender m
+
+# Or name a specific voice directly (overrides language/gender)
+./tts.sh --input ./speech.txt --output ./speech.mp3 --voice bm_george
 ```
 
 Make the script executable once:
@@ -52,9 +55,30 @@ chmod +x tts.sh
 
 - `--input <file.txt>`: input plain text file. Default `./input.txt`.
 - `--output <file.mp3>`: output MP3. Default `./output.mp3`.
-- `--voice <voice_id>`: Kokoro voice id. Default `af_heart`. The language code
-  is taken from the first letter of the voice (for example `a` for American
-  English voices `af_*` and `am_*`, `b` for British English `bf_*` and `bm_*`).
+- `--voice-language <locale>`: voice language as an ISO locale. Supported:
+  `en_US` (American English) and `en_GB` (British English). Default `en_US`.
+- `--voice-gender <m|f>`: voice gender. Default `f`.
+- `--voice <voice_id>`: an explicit Kokoro voice id (for example `af_heart`,
+  `bm_george`). When set, it overrides `--voice-language` and `--voice-gender`.
+
+The language code Kokoro uses is taken from the first letter of the resolved
+voice id (`a` for American English voices, `b` for British English).
+
+### Supported languages and the mapping
+
+Kokoro-82M only includes American and British English among common Western
+locales. It has no German and no Australian English voices, so `de` and `en_AU`
+are not available and will produce a clear error. The current language and
+gender combinations map to these voices:
+
+| Language | Locale | Female | Male |
+|---|---|---|---|
+| American English | `en_US` | `af_heart` | `am_michael` |
+| British English | `en_GB` | `bf_emma` | `bm_george` |
+
+To add a locale later, add its `(locale, gender)` entries to `VOICE_MAP` in
+`main.py`. Note that adding `de` would also require a model that actually
+provides German voices; Kokoro-82M does not.
 
 ## Why soundfile for the MP3 step
 
