@@ -114,10 +114,14 @@ ensure_uv() {
     if command -v uv >/dev/null 2>&1; then
         return
     fi
-    echo "uv not found. Installing uv via the official installer ..."
-    curl -LsSf https://astral.sh/uv/install.sh | sh
-    # The installer drops uv in ~/.local/bin; make it visible for this session.
-    export PATH="$HOME/.local/bin:$PATH"
+    echo "uv not found. Attempting to install it ..."
+    if command -v brew >/dev/null 2>&1; then
+        brew install uv
+    else
+        curl -LsSf https://astral.sh/uv/install.sh | sh
+        # The installer drops uv in ~/.local/bin; make it visible for this session.
+        export PATH="$HOME/.local/bin:$PATH"
+    fi
     if ! command -v uv >/dev/null 2>&1; then
         echo "error: uv installation appears to have failed. Install it manually" >&2
         echo "       from https://docs.astral.sh/uv/ and re-run." >&2

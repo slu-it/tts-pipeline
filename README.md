@@ -19,7 +19,8 @@ speech with [Kokoro](https://github.com/hexgrad/kokoro), and writes an MP3.
 
 The script installs what it can on its own:
 
-- `uv` (installed automatically via the official installer if missing).
+- `uv` (installed via Homebrew on macOS or via the official installer on 
+  Debian/Ubuntu if missing; on other systems install it yourself).
 - `espeak-ng` (installed via Homebrew on macOS or apt on Debian/Ubuntu if
   missing; on other systems install it yourself).
 - Python dependencies (`kokoro`, `soundfile`, `numpy`) are installed into the
