@@ -1,10 +1,15 @@
 """Local text-to-speech pipeline.
 
-Reads a plain text file and synthesizes speech with Kokoro, streaming each audio
+Reads plain text files and synthesizes speech with Kokoro, streaming each audio
 chunk straight into the MP3 as it is produced (via soundfile / libsndfile). Only
 one chunk is held in memory at a time, so memory use does not grow with the
-length of the audio. Input and output must be absolute paths; the accompanying
-shell script (tts.sh) turns relative paths into absolute ones.
+length of the audio.
+
+--input and --output may be repeated to convert several files in one run; the
+nth --input is written to the nth --output and the Kokoro model is loaded once
+for the whole batch. All paths must be absolute; the accompanying shell script
+(tts.sh) turns relative paths into absolute ones and expands a directory into
+the .txt files inside it.
 """
 
 import argparse
@@ -81,19 +86,29 @@ def require_absolute(path_str: str, label: str) -> Path:
 
 
 def read_text(path: Path) -> str:
-    """Read and return the stripped contents of the input file."""
+    """Read and return the stripped contents of the input file.
+
+    An empty result is returned as-is rather than treated as an error here, so
+    that a batch can skip an empty file and carry on with the rest.
+    """
     if not path.is_file():
         sys.exit(f"error: input file not found: {path}")
-    text = path.read_text(encoding="utf-8").strip()
-    if not text:
-        sys.exit(f"error: input file is empty: {path}")
-    return text
+    return path.read_text(encoding="utf-8").strip()
+
+
+def build_pipeline(lang_code: str):
+    """Load the Kokoro pipeline once, so a batch does not reload it per file."""
+    # Imported lazily so that --help and argument errors do not pay the cost of
+    # loading torch and the Kokoro model.
+    from kokoro import KPipeline
+
+    return KPipeline(lang_code=lang_code, repo_id="hexgrad/Kokoro-82M")
 
 
 def synthesize_to_mp3(
+        pipeline,
         text: str,
         voice: str,
-        lang_code: str,
         output_path: Path,
         compression_level: float,
 ) -> float:
@@ -103,11 +118,6 @@ def synthesize_to_mp3(
     discarded, so peak memory holds at most a single chunk rather than the whole
     recording. Returns the duration of the written audio in seconds.
     """
-    # Imported lazily so that --help and argument errors do not pay the cost of
-    # loading torch and the Kokoro model.
-    from kokoro import KPipeline
-
-    pipeline = KPipeline(lang_code=lang_code, repo_id="hexgrad/Kokoro-82M")
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     # The writer is opened lazily on the first chunk so that, if Kokoro yields
@@ -142,8 +152,22 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Synthesize speech from a text file and write an MP3."
     )
-    parser.add_argument("--input", required=True, help="Absolute path to the input .txt file.")
-    parser.add_argument("--output", required=True, help="Absolute path to the output .mp3 file.")
+    parser.add_argument(
+        "--input",
+        required=True,
+        action="append",
+        metavar="PATH",
+        help="Absolute path to an input .txt file. May be repeated; the nth "
+             "--input is paired with the nth --output.",
+    )
+    parser.add_argument(
+        "--output",
+        required=True,
+        action="append",
+        metavar="PATH",
+        help="Absolute path to the output .mp3 file. Must be given as often as "
+             "--input.",
+    )
     parser.add_argument(
         "--voice",
         default="",
@@ -181,19 +205,44 @@ def parse_args(argv=None) -> argparse.Namespace:
 def main(argv=None) -> None:
     args = parse_args(argv)
 
-    input_path = require_absolute(args.input, "input")
-    output_path = require_absolute(args.output, "output")
+    if len(args.input) != len(args.output):
+        sys.exit(
+            f"error: got {len(args.input)} --input and {len(args.output)} --output "
+            f"values. Each --input needs exactly one matching --output."
+        )
+
+    pairs = [
+        (require_absolute(in_path, "input"), require_absolute(out_path, "output"))
+        for in_path, out_path in zip(args.input, args.output)
+    ]
 
     voice = resolve_voice(args.voice, args.voice_language, args.voice_gender)
     # The Kokoro language code must match the voice; default to the voice prefix.
     lang_code = args.lang_code or (voice[:1] or "a")
     quality = min(max(args.mp3_quality, 0.0), MAX_COMPRESSION_LEVEL)
 
-    text = read_text(input_path)
-    print(f"Synthesizing {len(text)} characters with voice '{voice}' ...")
+    # Read every input before loading the model, so a missing file fails fast.
+    texts = [read_text(in_path) for in_path, _ in pairs]
+    if not any(texts):
+        sys.exit("error: nothing to synthesize; every input file is empty.")
 
-    duration = synthesize_to_mp3(text, voice, lang_code, output_path, quality)
-    print(f"Done. Wrote {output_path} ({duration:.1f}s of audio).")
+    pipeline = build_pipeline(lang_code)
+
+    written = 0
+    for index, ((input_path, output_path), text) in enumerate(zip(pairs, texts), start=1):
+        # Number the lines only when there is actually a batch to follow.
+        prefix = f"[{index}/{len(pairs)}] " if len(pairs) > 1 else ""
+        if not text:
+            print(f"{prefix}Skipping {input_path}: file is empty.")
+            continue
+        print(f"{prefix}Synthesizing {len(text)} characters from {input_path.name} "
+              f"with voice '{voice}' ...")
+        duration = synthesize_to_mp3(pipeline, text, voice, output_path, quality)
+        written += 1
+        print(f"{prefix}Done. Wrote {output_path} ({duration:.1f}s of audio).")
+
+    if written == 0:
+        sys.exit("error: nothing was synthesized; every input file was empty.")
 
 
 if __name__ == "__main__":

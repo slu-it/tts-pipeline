@@ -7,12 +7,19 @@
 # synthesizer with absolute paths.
 #
 # Usage:
-#   ./tts.sh [--input <file.txt>] [--output <file.mp3>]
+#   ./tts.sh [--input <file.txt|dir>] [--output <file.mp3|dir>]
 #            [--voice-language <locale>] [--voice-gender <m|f>] [--voice <id>]
 #
-#   --input           Plain text (.txt) file. Relative paths resolve against the
-#                     directory you run the script from. Default: ./input.txt
-#   --output          MP3 file to write. Default: ./output.mp3
+#   --input           Plain text (.txt) file, or a directory. A directory means
+#                     "convert every .txt file directly inside it" (not
+#                     recursive). Relative paths resolve against the directory
+#                     you run the script from. Default: ./input.txt
+#   --output          MP3 file, or a directory to write the MP3s into. A path
+#                     that already is a directory, or that does not end in
+#                     .mp3, is treated as a directory and created if needed.
+#                     A directory input requires a directory output.
+#                     Default: this script's directory, with each MP3 named
+#                     after its input file.
 #   --voice-language  Voice language: en_US or en_GB. Default: en_US.
 #   --voice-gender    Voice gender: m or f. Default: f.
 #   --voice           Explicit Kokoro voice id (e.g. af_heart). Overrides
@@ -24,7 +31,8 @@ set -euo pipefail
 # Defaults
 # ---------------------------------------------------------------------------
 INPUT="./input.txt"
-OUTPUT="./output.mp3"
+# Empty OUTPUT means: write next to this script, named after the input file.
+OUTPUT=""
 # Empty VOICE means: derive the voice from language + gender on the Python side.
 VOICE=""
 VOICE_LANGUAGE="en_US"
@@ -65,47 +73,142 @@ done
 # invoked the script.
 # ---------------------------------------------------------------------------
 
-# Provisional absolute input path (normalized properly after we confirm it exists).
 case "$INPUT" in
     /*) ABS_INPUT="$INPUT" ;;
     *)  ABS_INPUT="$PWD/$INPUT" ;;
 esac
 
-# Output directory may not exist yet; create it, then normalize the directory.
-case "$OUTPUT" in
-    /*) ABS_OUTPUT="$OUTPUT" ;;
-    *)  ABS_OUTPUT="$PWD/$OUTPUT" ;;
-esac
-OUT_DIR="$(dirname "$ABS_OUTPUT")"
-mkdir -p "$OUT_DIR"
-ABS_OUTPUT="$(cd "$OUT_DIR" && pwd)/$(basename "$ABS_OUTPUT")"
-
-# ---------------------------------------------------------------------------
-# Validate that the input really is a plain .txt file (not Word, RTF, etc.)
-# ---------------------------------------------------------------------------
-case "$INPUT" in
-    *.txt) ;;
-    *) echo "error: --input must have a .txt extension, got '$INPUT'" >&2; exit 1 ;;
-esac
-
-if [ ! -f "$ABS_INPUT" ]; then
-    echo "error: input file not found: $ABS_INPUT" >&2
+# The input must exist, so we can normalize it right away (this strips '.'
+# and '..' segments) and tell a file apart from a directory.
+if [ -d "$ABS_INPUT" ]; then
+    INPUT_IS_DIR=1
+    ABS_INPUT="$(cd "$ABS_INPUT" && pwd)"
+elif [ -f "$ABS_INPUT" ]; then
+    INPUT_IS_DIR=0
+    ABS_INPUT="$(cd "$(dirname "$ABS_INPUT")" && pwd)/$(basename "$ABS_INPUT")"
+else
+    echo "error: input not found: $ABS_INPUT" >&2
     exit 1
 fi
 
-# Now that the file exists, normalize its directory (strips '.' and '..').
-ABS_INPUT="$(cd "$(dirname "$ABS_INPUT")" && pwd)/$(basename "$ABS_INPUT")"
+# ---------------------------------------------------------------------------
+# Collect the input files.
+# ---------------------------------------------------------------------------
+# The element count is tracked in a plain variable: bash 3.2 (still the system
+# bash on macOS) errors out under 'set -u' when an empty array is expanded.
+INPUT_FILES=()
+INPUT_COUNT=0
+if [ "$INPUT_IS_DIR" -eq 1 ]; then
+    # Only the .txt files directly inside the directory; subdirectories are
+    # left alone. nullglob makes a non-matching glob expand to nothing instead
+    # of to the literal pattern.
+    shopt -s nullglob
+    for f in "$ABS_INPUT"/*.txt; do
+        INPUT_FILES+=("$f")
+        INPUT_COUNT=$(( INPUT_COUNT + 1 ))
+    done
+    shopt -u nullglob
+    if [ "$INPUT_COUNT" -eq 0 ]; then
+        echo "error: no .txt files found in directory: $ABS_INPUT" >&2
+        exit 1
+    fi
+else
+    # A single file must really be a .txt (not Word, RTF, etc.).
+    case "$ABS_INPUT" in
+        *.txt) ;;
+        *) echo "error: --input must have a .txt extension, got '$INPUT'" >&2; exit 1 ;;
+    esac
+    INPUT_FILES=("$ABS_INPUT")
+    INPUT_COUNT=1
+fi
 
-# Use 'file' to detect the real content type. Only genuine plain text passes;
-# Word (.doc/.docx), RTF, PDF, and binary files report other MIME types and are
-# rejected here.
-MIME="$(file --mime-type -b "$ABS_INPUT")"
-if [ "$MIME" != "text/plain" ]; then
-    echo "error: input is not plain text (detected type: $MIME)." >&2
-    echo "       Word documents, RTF, and other rich text formats are not supported." >&2
-    echo "       Please provide a plain UTF-8 .txt file." >&2
+# Drop files that hold nothing but whitespace: there is no speech in them, and
+# 'file' reports such files as empty or binary rather than as text, which would
+# otherwise abort the whole run over a single blank file.
+KEPT_FILES=()
+KEPT_COUNT=0
+for f in "${INPUT_FILES[@]}"; do
+    if grep -q '[^[:space:]]' "$f" 2>/dev/null; then
+        KEPT_FILES+=("$f")
+        KEPT_COUNT=$(( KEPT_COUNT + 1 ))
+    else
+        echo "skipping empty file: $f"
+    fi
+done
+if [ "$KEPT_COUNT" -eq 0 ]; then
+    echo "error: nothing to convert; every input file is empty." >&2
     exit 1
 fi
+INPUT_FILES=("${KEPT_FILES[@]}")
+INPUT_COUNT="$KEPT_COUNT"
+
+# Use 'file' to detect the real content type of every input. Only genuine plain
+# text passes; Word (.doc/.docx), RTF, PDF, and binary files report other MIME
+# types and are rejected here. Checking all of them up front means a bad file is
+# reported before any (slow) synthesis starts.
+for f in "${INPUT_FILES[@]}"; do
+    MIME="$(file --mime-type -b "$f")"
+    if [ "$MIME" != "text/plain" ]; then
+        echo "error: input is not plain text (detected type: $MIME): $f" >&2
+        echo "       Word documents, RTF, and other rich text formats are not supported." >&2
+        echo "       Please provide plain UTF-8 .txt files." >&2
+        exit 1
+    fi
+done
+
+# ---------------------------------------------------------------------------
+# Resolve the output. It is a directory when it already exists as one, when it
+# does not end in .mp3, or when no --output was given at all (in which case the
+# MP3s land next to this script). Directories may not exist yet, so create them.
+# ---------------------------------------------------------------------------
+if [ -z "$OUTPUT" ]; then
+    OUTPUT_IS_DIR=1
+    ABS_OUTPUT="$SCRIPT_DIR"
+else
+    case "$OUTPUT" in
+        /*) ABS_OUTPUT="$OUTPUT" ;;
+        *)  ABS_OUTPUT="$PWD/$OUTPUT" ;;
+    esac
+
+    if [ -d "$ABS_OUTPUT" ]; then
+        OUTPUT_IS_DIR=1
+    else
+        case "$ABS_OUTPUT" in
+            *.mp3) OUTPUT_IS_DIR=0 ;;
+            *)     OUTPUT_IS_DIR=1 ;;
+        esac
+    fi
+fi
+
+if [ "$OUTPUT_IS_DIR" -eq 1 ]; then
+    mkdir -p "$ABS_OUTPUT"
+    ABS_OUTPUT="$(cd "$ABS_OUTPUT" && pwd)"
+else
+    if [ "$INPUT_IS_DIR" -eq 1 ]; then
+        echo "error: --input is a directory, so --output must be a directory too," >&2
+        echo "       not a single MP3 file: '$OUTPUT'" >&2
+        exit 1
+    fi
+    OUT_DIR="$(dirname "$ABS_OUTPUT")"
+    mkdir -p "$OUT_DIR"
+    ABS_OUTPUT="$(cd "$OUT_DIR" && pwd)/$(basename "$ABS_OUTPUT")"
+fi
+
+# ---------------------------------------------------------------------------
+# Pair every input file with its output file. main.py takes one --output per
+# --input, in order, and synthesizes them all in a single process so the Kokoro
+# model is loaded only once for the whole batch.
+# ---------------------------------------------------------------------------
+PY_ARGS=()
+for f in "${INPUT_FILES[@]}"; do
+    if [ "$OUTPUT_IS_DIR" -eq 1 ]; then
+        BASE="$(basename "$f")"
+        OUT_FILE="$ABS_OUTPUT/${BASE%.txt}.mp3"
+    else
+        OUT_FILE="$ABS_OUTPUT"
+    fi
+    PY_ARGS+=(--input "$f" --output "$OUT_FILE")
+done
 
 # ---------------------------------------------------------------------------
 # Ensure global dependencies: uv and espeak-ng.
@@ -170,8 +273,13 @@ if [ "$(uname -s)" = "Darwin" ]; then
 fi
 
 echo "Running synthesis ..."
-echo "  input:    $ABS_INPUT"
-echo "  output:   $ABS_OUTPUT"
+if [ "$INPUT_COUNT" -gt 1 ]; then
+    echo "  inputs:   $INPUT_COUNT .txt files in $ABS_INPUT"
+    echo "  output:   $ABS_OUTPUT/ (one MP3 per input file)"
+else
+    echo "  input:    ${PY_ARGS[1]}"
+    echo "  output:   ${PY_ARGS[3]}"
+fi
 if [ -n "$VOICE" ]; then
     echo "  voice:    $VOICE (explicit)"
 else
@@ -186,8 +294,7 @@ START_TS="$(date +%s)"
 # VOICE may be empty, in which case Python derives the voice from language and
 # gender. An empty --voice argument is treated as "not set" on the Python side.
 uv run main.py \
-    --input "$ABS_INPUT" \
-    --output "$ABS_OUTPUT" \
+    "${PY_ARGS[@]}" \
     --voice "$VOICE" \
     --voice-language "$VOICE_LANGUAGE" \
     --voice-gender "$VOICE_GENDER"
